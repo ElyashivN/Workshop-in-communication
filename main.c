@@ -70,6 +70,7 @@ struct pingpong_context {
     int				size;
     int				rx_depth;
     int				routs;
+    long int        available;
     struct ibv_port_attr	portinfo;
 };
 
@@ -1225,11 +1226,15 @@ int kv_close(void *kv_handle); /* Destroys the QP */
 #define MEGA_POWER 20
 #define PORT 8540
 #define GIGABIT 1073741824
+#define KB4 4096
 //
 //int server(struct pingpong_context *ctx);
 //int client(struct pingpong_context *ctx, int tx_depth);
 
 int kv_open(char *servername, void **kv_handle){/*Connect to server*/
+  //todo change default arguments
+  //todo ersae later, after everything works, everything that is not needed
+  // (most!)
     struct ibv_device      **dev_list;
     struct ibv_device       *ib_dev;
     struct pingpong_context *ctx;
@@ -1431,16 +1436,58 @@ int kv_open(char *servername, void **kv_handle){/*Connect to server*/
     return 0;
   }
 
-  int kv_close(void *kv_handle){
+int kv_close(void *kv_handle){
     pp_close_ctx(kv_handle);
   }/* Destroys the QP */
 
-  void kv_release(char *value){
+void kv_release(char *value){
     free(value);
   }
-/* Called after get() on value pointer */
+//  struct{
+//    char[4096] keyvalue;
+//    int isSet;
+//}kv_pair;
 
+/* Called after get() on value pointer */
 int kv_set(void *kv_handle, const char *key, const char *value){
+  if(strlen(key)+strlen(value)<KB4){
+    //part 1, eager protocol
+    struct pingpong_context* ctx = (*struct pingpong_context*)kv_handle;
+     char* buf = (char*)ctx->buf;
+     long int available_spot = ctx->available;
+     //  we differentiate the key and the value using the null character '/0'
+     strcpy(buf+available_spot, key);
+     strcpy(buf+available_spot+strlen(key)+1, value);
+     ctx->size = strlen(key)+strlen(value)+2; //len+ null characters
+     //todo: almost definetly not this number, but needs to be send in a
+     // structure of some sort
+     if(pp_post_send (ctx)){
+      //didn't post send
+       return 1;
+     }
+    if (pp_wait_completions(ctx, 1)) {
+      //didnt got back ack
+      return 1;
+    }
+     ctx->available +=strlen(key)+strlen(value)+2;//+2 for the null character
+
+
+
+//    memcpy(buf+available_spot, key ,strlen(key));
+//    memcpy(buf+available_spot+strlen(key), value, strlen(value));
+//    memcpy(buf+available_spot, keyvalue, 4096);
+//    (*struct pingpong_context*)kv_handle.available+=4096;
+
+  }
+
 
 }
 int kv_get(void *kv_handle, const char *key, char **value);
+
+
+//#############################################################################
+//                            SERVER
+//#############################################################################
+
+int set_server(){
+}

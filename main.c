@@ -1550,7 +1550,7 @@ int kv_get(void *kv_handle, const char *key, char **value){
  * @param client_space client space
  * @return 0 if good false if failed
  */
-int create_space(void **client_space){
+int create_space(char **client_space){
   *client_space = malloc((4* KB4)+(sizeof(int)*2));
   if(*client_space == NULL){
     return 1;
@@ -1568,7 +1568,7 @@ int create_space(void **client_space){
  * @param client_space  the client space
  * @return 1 on failure 0 oterwise
  */
-int allocate_space(void** client_space){
+int allocate_space(char** client_space){
   if(*client_space == NULL){
     create_space(client_space);
   }
@@ -1613,7 +1613,7 @@ int find_key(char* key, void* client_space){
  * @param start the starting point of the server
  * @return 1 if failed otherwise 0
  */
-int set_server(struct pingpong_context *ctx,void** client_space){
+int set_server(struct pingpong_context *ctx,char** client_space){
   // stage 1: get the key and value
   // they are stored on the ctx->buf, last
   char* key = strtok((char*)ctx->buf, '\0');
@@ -1621,7 +1621,7 @@ int set_server(struct pingpong_context *ctx,void** client_space){
   int key_place = find_key(key, *client_space);
   if(key_place != -1){
     //means we find the key
-    strcpy(((char*)client_space[key_place+strlen(key)+1]), value);
+    strcpy((client_space[key_place+strlen(key)+1]), value);
     //copy the value(overwrite) on key
     return 0;
   }
@@ -1632,8 +1632,8 @@ int set_server(struct pingpong_context *ctx,void** client_space){
   }
   int cur_head = *(((int*)*client_space)-2); // the cur head we are going to
   // insert to
-  strcpy((char*)*client_space+cur_head,key);//copy head
-  strcpy((char*)*client_space+cur_head+strlen(key)+1, value);//copy value
+  strcpy(*client_space+cur_head,key);//copy head
+  strcpy(*client_space+cur_head+strlen(key)+1, value);//copy value
   *(((int*)*client_space)-2) += KB4 +2; // increment the cur head for later
   // send ack
   //todo check if we want to post send on that size?
@@ -1676,17 +1676,43 @@ int get_server(struct pingpong_context *ctx,char** client_space){
 
 }
 
-int init_server(char** client_space){
-    calloc(NUM_DEF_CLIENTS*sizeof(void*),)
+int init_server_space(char** client_space, void** ctxs,
+    int num_clients){
+    *client_space = calloc(num_clients, sizeof(void*));
+    if(*client_space == NULL){
+      return 1;//couldn't allocate the space
+    }
+    *ctxs = calloc(num_clients, sizeof (struct pingpong_context*));
+    if(*ctxs == NULL){
+      return 1;//couldn't allocate the space
+    }
+  return 0
 
 }
 
-int run_server(){
+int run_server(char* clients_names, int num_clients){
   //stage 1: init server with clients initialised, each with it's own space
   // set to NULL.
-  char** clients_space;
-  init_server(clients_space);
-
+  char** clients_spaces;
+  void* ctxs;
+  init_server_space(clients_spaces, &ctxs, num_clients);
   //stage 2: create the link to the communication and validate it
+  for(int i=0;i<num_clients;i++){
+    kv_open(clients_names, &(ctxs[i]));
+  }
   //stage 3(repeat): check on all clients and handle requests accordingly
+  while(1){
+    for(int i=0;i<num_clients;i++){
+      if(((struct pingpong_context*) ctxs)[i].set){
+        //set request
+        set_server (&((struct pingpong_context*) ctxs)[i],
+            &(clients_spaces[i]));
+      }
+      else{
+        //get request
+        get_server  (&((struct pingpong_context*) ctxs)[i],
+                     &(clients_spaces[i]));
+      }
+    }
+  }
 }

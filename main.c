@@ -51,6 +51,17 @@
 
 #define WC_BATCH (10)
 
+
+// ours
+#define MAX_INLINE 60
+#define MEGABIT 1048576
+#define MEGA_POWER 20
+#define PORT 8540
+#define GIGABIT 1073741824
+#define KB4 4096
+#define NUM_DEF_CLIENTS 4
+//
+
 enum {
     PINGPONG_RECV_WRID = 1,
     PINGPONG_SEND_WRID = 2,
@@ -66,11 +77,12 @@ struct pingpong_context {
     struct ibv_mr		*mr;
     struct ibv_cq		*cq;
     struct ibv_qp		*qp;
-    void			*buf;
+    char[KB4+2]     buf;//todo need to check that it doesnt screw the other
+    // calls to buff
     int				size;
     int				rx_depth;
     int				routs;
-    long int        available;
+    int             set;
     struct ibv_port_attr	portinfo;
 };
 
@@ -1220,14 +1232,6 @@ int kv_close(void *kv_handle); /* Destroys the QP */
 //
 //#############################################################################
 
-//
-#define MAX_INLINE 60
-#define MEGABIT 1048576
-#define MEGA_POWER 20
-#define PORT 8540
-#define GIGABIT 1073741824
-#define KB4 4096
-//
 //int server(struct pingpong_context *ctx);
 //int client(struct pingpong_context *ctx, int tx_depth);
 
@@ -1449,45 +1453,240 @@ void kv_release(char *value){
 //}kv_pair;
 
 /* Called after get() on value pointer */
+//int kv_set(void *kv_handle, const char *key, const char *value){
+//  if(strlen(key)+strlen(value)<KB4){
+//    //part 1, eager protocol
+//    struct pingpong_context* ctx = (*struct pingpong_context*)kv_handle;
+//     char* buf = (char*)ctx->buf;
+//     long int available_spot = ctx->available;
+//     //  we differentiate the key and the value using the null character '/0'
+//     strcpy(buf+available_spot, key);
+//     strcpy(buf+available_spot+strlen(key)+1, value);
+//     ctx->size = strlen(key)+strlen(value)+2; //len+ null characters
+//     //todo: almost definetly not this number, but needs to be send in a
+//     // structure of some sort
+//     if(pp_post_send (ctx)){
+//      //didn't post send
+//       return 1;
+//     }
+//    if (pp_wait_completions(ctx, 1)) {
+//      //didnt got back ack
+//      return 1;
+//    }
+//     ctx->available +=strlen(key)+strlen(value)+2;//+2 for the null character
+//
+//
+//  }
 int kv_set(void *kv_handle, const char *key, const char *value){
-  if(strlen(key)+strlen(value)<KB4){
+  if(strlen(key)+strlen(value)<KB4)
+  {
     //part 1, eager protocol
-    struct pingpong_context* ctx = (*struct pingpong_context*)kv_handle;
-     char* buf = (char*)ctx->buf;
-     long int available_spot = ctx->available;
-     //  we differentiate the key and the value using the null character '/0'
-     strcpy(buf+available_spot, key);
-     strcpy(buf+available_spot+strlen(key)+1, value);
-     ctx->size = strlen(key)+strlen(value)+2; //len+ null characters
-     //todo: almost definetly not this number, but needs to be send in a
-     // structure of some sort
-     if(pp_post_send (ctx)){
+    struct pingpong_context *ctx = (struct pingpong_context*)kv_handle;
+    char *buf = (char *) ctx->buf;
+    //  we differentiate the key and the value using the null character '/0'
+    strcpy (buf, key);
+    strcpy (buf + strlen (key) + 1, value);
+    ctx->size = strlen (key) + strlen (value) + 2; //len+ null characters
+    ctx->set = 1;
+    //todo: almost definetly not this number, but needs to be send in a
+    // structure of some sort
+    if (pp_post_send (ctx))
+    {
       //didn't post send
-       return 1;
-     }
-    if (pp_wait_completions(ctx, 1)) {
+      return 1;
+    }
+    if (pp_wait_completions (ctx, 1))
+    {
       //didnt got back ack
       return 1;
     }
-     ctx->available +=strlen(key)+strlen(value)+2;//+2 for the null character
-
-
-
-//    memcpy(buf+available_spot, key ,strlen(key));
-//    memcpy(buf+available_spot+strlen(key), value, strlen(value));
-//    memcpy(buf+available_spot, keyvalue, 4096);
-//    (*struct pingpong_context*)kv_handle.available+=4096;
-
   }
 
-
 }
-int kv_get(void *kv_handle, const char *key, char **value);
+/**
+ * send get request to server
+ * @param kv_handle the handle for the kv(ctx)
+ * @param key the key
+ * @param value the value to be loaded to
+ * @return 0 upon success, 1 upon failure
+ */
+int kv_get(void *kv_handle, const char *key, char **value){
+    //part 1, eager protocol
+    struct pingpong_context *ctx = (struct pingpong_context *) kv_handle;
+    char *buf = (char *) ctx->buf;
+    //  we differentiate the key and the value using the null character '/0'
+    strcpy (buf, key);
+    ctx->set = 0;
+    ctx->size = strlen (key) +1; //len+ null characters
+    //todo: almost definetly not this number, but needs to be send in a
+    // structure of some sort
+    if (pp_post_send (ctx))
+    {
+      //didn't post send
+      return 1;
+    }
+    ctx->size = KB4 + 2; //len+ null characters
+    if(pp_post_recv (ctx, 1)){
+      return 1;// post recv of the context
+    }
+    if(pp_wait_completions (ctx,1)){
+      return 1;// wait to get the number
+    }
+  strcpy (*value, ctx->buf);// copy to value the data recieved
+  return 0;
+}
+
 
 
 //#############################################################################
 //                            SERVER
 //#############################################################################
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
 
-int set_server(){
+/**
+ * create the space
+ * @param client_space client space
+ * @return 0 if good false if failed
+ */
+int create_space(void **client_space){
+  *client_space = malloc((4* KB4)+(sizeof(int)*2));
+  if(*client_space == NULL){
+    return 1;
+  }
+  *(int*)*client_space = 0;//represent the curr head
+  (int*)*client_space++;//move to next
+  *(int*)*client_space = 4* KB4;// represent size
+  (int*)*client_space++;
+  return 0;
+}
+
+/**
+ * allocate the space and allocate it, and change the size accordingly
+ * @param length length of the new variable to add
+ * @param client_space  the client space
+ * @return 1 on failure 0 oterwise
+ */
+int allocate_space(void** client_space){
+  if(*client_space == NULL){
+    create_space(client_space);
+  }
+  int size = ((int*)*client_space)[-1];
+  int cur_head = ((int*)*client_space)[-2];
+  if(size<cur_head+KB4+2)
+  {
+    //no more space need to realloc!
+    void *tmp = realloc (*client_space, fmax (size * 2, size + KB4+2));
+    if (tmp == NULL)
+    {
+      //if no more space can be allocated program failed!
+      return 1;
+    }
+    *client_space = tmp;
+    *(((int*)*client_space)-1) = fmax (size * 2, size + KB4+2);
+  }
+
+}
+/**
+ * find the key from the client space
+ * @param key the key to find
+ * @param client_space a space associated to the clients, an array of key
+ * values
+ * @return key place if found, -1 if not.
+ */
+int find_key(char* key, void* client_space){
+  int real_size = *((int*)client_space-2);
+  for (int i =0; i<real_size;i+=(KB4+2)){
+    char* cur_key = strtok(((char*)client_space+i), '\0');
+    if(strcmp (cur_key, key)==0){
+      return i; //return the place the key is in
+    }
+  }
+  return -1; //we didn't find the key
+}
+
+
+/**
+ *
+ * @param ctx ctx struct as we implemanted on ex2
+ * @param start the starting point of the server
+ * @return 1 if failed otherwise 0
+ */
+int set_server(struct pingpong_context *ctx,void** client_space){
+  // stage 1: get the key and value
+  // they are stored on the ctx->buf, last
+  char* key = strtok((char*)ctx->buf, '\0');
+  char * value = strtok(NULL, '\0');
+  int key_place = find_key(key, *client_space);
+  if(key_place != -1){
+    //means we find the key
+    strcpy(((char*)client_space[key_place+strlen(key)+1]), value);
+    //copy the value(overwrite) on key
+    return 0;
+  }
+  //stage 2: put in memory
+  if(allocate_space(client_space)){
+    //allocation failed, go back
+    return 1;
+  }
+  int cur_head = *(((int*)*client_space)-2); // the cur head we are going to
+  // insert to
+  strcpy((char*)*client_space+cur_head,key);//copy head
+  strcpy((char*)*client_space+cur_head+strlen(key)+1, value);//copy value
+  *(((int*)*client_space)-2) += KB4 +2; // increment the cur head for later
+  // send ack
+  //todo check if we want to post send on that size?
+  ctx->size = 1;
+  if (pp_post_send(ctx)){
+    //failed to send ctx
+    return 1;
+  }
+  return 0;//program ended succesfully
+
+}
+
+/**
+ * get the value requested by the key
+ * @param ctx the ctx
+ * @param client_space the space of the client
+ * @return the value associated with the key. default is ""
+ */
+int get_server(struct pingpong_context *ctx,char** client_space){
+  //stage 1: get the key
+  char* key = strtok(ctx->buf, '\0');
+  //stage 2: find the key
+  int key_place = find_key(key,*client_space);
+  if (key_place == -1){
+    //key is not found, return default value of ""
+    strcpy(ctx->buf, "");//todo check if this is the best way to transfer ""
+  }
+  else{
+    //stage 3: put key on buf
+    strcpy(ctx->buf, (*client_space)+key_place);
+  }
+  ctx->size = KB4;
+  //stage 4: return the key
+  if(pp_post_send (ctx)){
+    return 1;
+  }
+  if (pp_wait_completions(ctx, 1)) {
+    return 1; // wait to send data
+  }
+
+}
+
+int init_server(char** client_space){
+    calloc(NUM_DEF_CLIENTS*sizeof(void*),)
+
+}
+
+int run_server(){
+  //stage 1: init server with clients initialised, each with it's own space
+  // set to NULL.
+  char** clients_space;
+  init_server(clients_space);
+
+  //stage 2: create the link to the communication and validate it
+  //stage 3(repeat): check on all clients and handle requests accordingly
 }

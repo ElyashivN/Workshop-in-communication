@@ -77,7 +77,7 @@ struct pingpong_context {
     struct ibv_mr		*mr;
     struct ibv_cq		*cq;
     struct ibv_qp		*qp;
-    char[KB4+2]     buf;//todo need to check that it doesnt screw the other
+    char*               buf; //todo need to check that it doesnt screw the other
     // calls to buff
     int				size;
     int				rx_depth;
@@ -625,394 +625,187 @@ static void usage(const char* argv0)
   printf("  -g, --gid-idx=<gid index> local port gid index\n");
 }
 
-
-#define MAX_INLINE 60
-#define MEGABIT 1048576
-#define MEGA_POWER 20
-#define PORT 8540
-#define GIGABIT 1073741824
-
-int server(struct pingpong_context *ctx);
-int client(struct pingpong_context *ctx, int tx_depth);
-
-int main(int argc, char *argv[])
-{
-  struct ibv_device      **dev_list;
-  struct ibv_device       *ib_dev;
-  struct pingpong_context *ctx;
-  struct pingpong_dest     my_dest;
-  struct pingpong_dest    *rem_dest;
-  char                    *ib_devname = NULL;
-  char                    *servername;
-  int                      port = PORT;
-  int                      ib_port = 1;
-  enum ibv_mtu             mtu = IBV_MTU_2048;
-  int                      rx_depth = 100;
-  int                      tx_depth = 100;
-  int                      iters = 256;
-  int                      use_event = 0;
-  int                      size = MEGABIT;
-  int                      sl = 0;
-  int                      gidx = -1;
-  char                     gid[33];
-
-  srand48(getpid() * time(NULL));
-
-  while (1) {
-    int c;
-
-    static struct option long_options[] = {
-        { .name = "port",     .has_arg = 1, .val = 'p' },
-        { .name = "ib-dev",   .has_arg = 1, .val = 'd' },
-        { .name = "ib-port",  .has_arg = 1, .val = 'i' },
-        { .name = "size",     .has_arg = 1, .val = 's' },
-        { .name = "mtu",      .has_arg = 1, .val = 'm' },
-        { .name = "rx-depth", .has_arg = 1, .val = 'r' },
-        { .name = "iters",    .has_arg = 1, .val = 'n' },
-        { .name = "sl",       .has_arg = 1, .val = 'l' },
-        { .name = "events",   .has_arg = 0, .val = 'e' },
-        { .name = "gid-idx",  .has_arg = 1, .val = 'g' },
-        { 0 }
-    };
-
-    c = getopt_long(argc, argv, "p:d:i:s:m:r:n:l:eg:", long_options, NULL);
-    if (c == -1)
-      break;
-
-    switch (c) {
-      case 'p':
-        port = strtol(optarg, NULL, 0);
-        if (port < 0 || port > 65535) {
-          usage(argv[0]);
-          return 1;
-        }
-        break;
-
-      case 'd':
-        ib_devname = strdup(optarg);
-        break;
-
-      case 'i':
-        ib_port = strtol(optarg, NULL, 0);
-        if (ib_port < 0) {
-          usage(argv[0]);
-          return 1;
-        }
-        break;
-
-      case 's':
-        size = strtol(optarg, NULL, 0);
-        break;
-
-      case 'm':
-        mtu = pp_mtu_to_enum(strtol(optarg, NULL, 0));
-        if (mtu < 0) {
-          usage(argv[0]);
-          return 1;
-        }
-        break;
-
-      case 'r':
-        rx_depth = strtol(optarg, NULL, 0);
-        break;
-
-      case 'n':
-        iters = strtol(optarg, NULL, 0);
-        break;
-
-      case 'l':
-        sl = strtol(optarg, NULL, 0);
-        break;
-
-      case 'e':
-        ++use_event;
-        break;
-
-      case 'g':
-        gidx = strtol(optarg, NULL, 0);
-        break;
-
-      default:
-        usage(argv[0]);
-        return 1;
-    }
-  }
-
-  if (optind == argc - 1)
-    servername = strdup(argv[optind]);
-  else if (optind < argc) {
-    usage(argv[0]);
-    return 1;
-  }
-
-  page_size = sysconf(_SC_PAGESIZE);
-
-  dev_list = ibv_get_device_list(NULL);
-  if (!dev_list) {
-    perror("Failed to get IB devices list");
-    return 1;
-  }
-
-  if (!ib_devname) {
-    ib_dev = *dev_list;
-    if (!ib_dev) {
-      fprintf(stderr, "No IB devices found\n");
-      return 1;
-    }
-  } else {
-    int i;
-    for (i = 0; dev_list[i]; ++i)
-      if (!strcmp(ibv_get_device_name(dev_list[i]), ib_devname))
-        break;
-    ib_dev = dev_list[i];
-    if (!ib_dev) {
-      fprintf(stderr, "IB device %s not found\n", ib_devname);
-      return 1;
-    }
-  }
-
-  ctx = pp_init_ctx(ib_dev, size, rx_depth, tx_depth, ib_port, use_event, !servername);
-  if (!ctx)
-    return 1;
-
-  ctx->routs = pp_post_recv(ctx, ctx->rx_depth);
-  if (ctx->routs < ctx->rx_depth) {
-    fprintf(stderr, "Couldn't post receive (%d)\n", ctx->routs);
-    return 1;
-  }
-
-  if (use_event)
-    if (ibv_req_notify_cq(ctx->cq, 0)) {
-      fprintf(stderr, "Couldn't request CQ notification\n");
-      return 1;
-    }
-
-
-  if (pp_get_port_info(ctx->context, ib_port, &ctx->portinfo)) {
-    fprintf(stderr, "Couldn't get port info\n");
-    return 1;
-  }
-
-  my_dest.lid = ctx->portinfo.lid;
-  if (ctx->portinfo.link_layer == IBV_LINK_LAYER_INFINIBAND && !my_dest.lid) {
-    fprintf(stderr, "Couldn't get local LID\n");
-    return 1;
-  }
-
-  if (gidx >= 0) {
-    if (ibv_query_gid(ctx->context, ib_port, gidx, &my_dest.gid)) {
-      fprintf(stderr, "Could not get local gid for gid index %d\n", gidx);
-      return 1;
-    }
-  } else
-    memset(&my_dest.gid, 0, sizeof my_dest.gid);
-
-  my_dest.qpn = ctx->qp->qp_num;
-  my_dest.psn = lrand48() & 0xffffff;
-  inet_ntop(AF_INET6, &my_dest.gid, gid, sizeof gid);
-  printf("  local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-         my_dest.lid, my_dest.qpn, my_dest.psn, gid);
-
-
-  if (servername)
-    rem_dest = pp_client_exch_dest(servername, port, &my_dest);
-  else
-    rem_dest = pp_server_exch_dest(ctx, ib_port, mtu, port, sl, &my_dest, gidx);
-
-  if (!rem_dest)
-    return 1;
-
-  inet_ntop(AF_INET6, &rem_dest->gid, gid, sizeof gid);
-  printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-         rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
-
-  if (servername)
-    if (pp_connect_ctx(ctx, ib_port, my_dest.psn, mtu, sl, rem_dest, gidx))
-      return 1;
-
-  if (servername) {
-    // Client helper function
-    client(ctx, tx_depth);
-  } else {
-    // Server helper function
-    server(ctx);
-  }
-
-  ibv_free_device_list(dev_list);
-  free(rem_dest);
-  return 0;
-}
-
-///OUR CODE STARTS HERE
-
-
-#define NUM_MESSAGES 8192          // Number of messages to be sent/received during measurement
-#define NUM_WARMUP_CYCLES 1024     // Number of warm-up cycles before actual measurement
-#define MICROSECONDS_IN_SECOND 1e6 // Conversion factor for microseconds to seconds
-#define BYTES_TO_MEGABITS 8388608  // 8 * 1024 * 1024 (to convert bytes to megabits)
-#define SUCCESS 0
-#define FAILURE 1
-
-// Function to calculate the throughput in Mbit/s
-double calculate_throughput(struct timeval start_time, struct timeval end_time, int data_size_bytes) {
-  // Convert seconds and microseconds to total elapsed time in seconds
-  double elapsed_time_seconds = (double)(end_time.tv_sec - start_time.tv_sec) +
-                                (double)(end_time.tv_usec - start_time.tv_usec) / MICROSECONDS_IN_SECOND; // Time in seconds
-
-  // Calculate total data transmitted in megabits (Bytes to Megabits conversion)
-  double total_data_megabits = ((double)data_size_bytes * (double)NUM_MESSAGES * 8) / BYTES_TO_MEGABITS;
-
-  // Calculate throughput in Mbit/s (Megabits per second)
-  double throughput_mbps = total_data_megabits / elapsed_time_seconds;
-
-  return throughput_mbps;
-}
-
-// Function to post a send request with the specified flags
-static int submit_send_request(struct pingpong_context* context, unsigned int send_flags) {
-  // Initialize a scatter-gather element (SGL)
-  struct ibv_sge scatter_gather_entry;
-  scatter_gather_entry.addr = (uint64_t)context->buf;   // Buffer address
-  scatter_gather_entry.length = context->size;          // Size of the buffer
-  scatter_gather_entry.lkey = context->mr->lkey;        // Local key for the memory region
-
-  // Initialize a work request (WR)
-  struct ibv_send_wr send_request;
-  struct ibv_send_wr* bad_request = NULL;
-  send_request.wr_id = PINGPONG_SEND_WRID;    // Work request ID
-  send_request.sg_list = &scatter_gather_entry; // Scatter-gather list
-  send_request.num_sge = 1;                   // Number of scatter-gather elements
-  send_request.opcode = IBV_WR_SEND;          // Operation code (send)
-  send_request.send_flags = send_flags;       // Send flags (e.g., signaling)
-  send_request.next = NULL;                   // Pointer to the next work request
-  struct ibv_send_wr* bad_request = NULL;
-
-  // Post the send request to the queue pair
-  int result = ibv_post_send(context->qp, &send_request, &bad_request);
-  if (result) {
-    fprintf(stderr, "Error: Failed to post send request\n");
-    return FAILURE;
-  }
-
-  return SUCCESS;
-}
-
-// Function to send data multiple times based on the specified depth and size
-int transmit_data(struct pingpong_context* context, int data_size_bytes, int num_iterations, int tx_depth) {
-  // Set the size of the data to be sent in the context
-  context->size = data_size_bytes;
-
-  // Determine the send flag: signaled, and optionally inline if data size allows
-  unsigned int send_flags = IBV_SEND_SIGNALED;
-  if (data_size_bytes < MAX_INLINE) {
-    send_flags |= IBV_SEND_INLINE; // Add the inline flag if applicable
-  }
-
-  for (int iteration = 0; iteration < num_iterations; iteration++) {
-    // After every 'tx_depth' sends, wait for the completions
-    if ((iteration != 0) && (iteration % tx_depth == 0)) {
-      pp_wait_completions(context, tx_depth);
-    }
-
-    // Attempt to post the send request with the current flag
-    int result = submit_send_request(context, send_flags);
-    if (result != SUCCESS) {
-      fprintf(stderr, "Error: Client couldn't post send\n");
-      return FAILURE;
-    }
-  }
-
-  // Ensure all sends have completed
-  pp_wait_completions(context, tx_depth);
-  // Wait for a single completion (likely a response from the server)
-  pp_wait_completions(context, 1);
-
-  return SUCCESS;
-}
-
-// Function to receive data multiple times based on the specified size and iterations
-int receive_data(struct pingpong_context* context, int data_size_bytes, int num_iterations) {
-  // Set the flag to be used for sending the response
-  unsigned int send_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
-
-  // Wait for completions for all iterations
-  pp_wait_completions(context, num_iterations);
-
-  // Save the current data size and temporarily set it to 1 for the response
-  int original_data_size = context->size;
-  context->size = 1;
-
-  // Attempt to post the send request with the specified flag
-  int result = submit_send_request(context, send_flags);
-  if (result != SUCCESS) {
-    fprintf(stderr, "Error: Server couldn't post send\n");
-    return FAILURE;
-  }
-
-  // Restore the original data size
-  context->size = original_data_size;
-
-  // Wait for the completion of the send request
-  pp_wait_completions(context, 1);
-
-  return SUCCESS;
-}
-
-// Client function to perform throughput measurement for different data sizes
-int client(int tx_depth, struct pingpong_context* context) {
-  struct timeval start_time, end_time;
-
-  // Allocate memory to store throughput results for different data sizes
-  double* throughput_results = (double*)malloc((MEGA_POWER + 1) * sizeof(double));
-  if (!throughput_results) {
-    fprintf(stderr, "Error: Memory allocation failed\n");
-    return FAILURE;
-  }
-
-  int result_index = 0;
-
-  // Iterate over data sizes from 1 byte to MEGABIT bytes, doubling each time
-  for (int data_size_bytes = 1; data_size_bytes <= MEGABIT; data_size_bytes <<= 1) {
-    // Perform warm-up cycles to stabilize measurements
-    transmit_data(context, data_size_bytes, NUM_WARMUP_CYCLES, tx_depth);
-
-    // Measure the time taken to send the data
-    gettimeofday(&start_time, NULL);        // Record start time
-    transmit_data(context, data_size_bytes, NUM_MESSAGES, tx_depth);
-    gettimeofday(&end_time, NULL);          // Record end time
-
-    // Calculate throughput for the current data size
-    throughput_results[result_index] = calculate_throughput(start_time, end_time, data_size_bytes);
-
-    // Output the throughput for the current data size
-    printf("%d\t%f\tMbit/s\n", data_size_bytes, throughput_results[result_index]);
-    result_index++;
-  }
-
-  // Indicate that the client operation is complete
-  printf("Client: Done.\n");
-
-  // Free the allocated memory
-  free(throughput_results);
-
-  return SUCCESS;
-}
-
-// Server function to receive data for different data sizes
-int server(struct pingpong_context* context) {
-  // Iterate over data sizes from 1 byte to MEGABIT bytes, doubling each time
-  for (int data_size_bytes = 1; data_size_bytes <= MEGABIT; data_size_bytes <<= 1) {
-    // Perform warm-up cycles to stabilize measurements
-    receive_data(context, data_size_bytes, NUM_WARMUP_CYCLES);
-
-    // Receive the actual data for the given size
-    receive_data(context, data_size_bytes, NUM_MESSAGES);
-  }
-
-  // Indicate that the server operation is complete
-  printf("Server: Done.\n");
-  return SUCCESS;
-}
+//
+//#define MAX_INLINE 60
+//#define MEGABIT 1048576
+//#define MEGA_POWER 20
+//#define PORT 8540
+//#define GIGABIT 1073741824
+//
+//int server(struct pingpong_context *ctx);
+//int client(struct pingpong_context *ctx, int tx_depth);
+//
+//
+/////OUR CODE STARTS HERE
+//
+//
+//#define NUM_MESSAGES 8192          // Number of messages to be sent/received during measurement
+//#define NUM_WARMUP_CYCLES 1024     // Number of warm-up cycles before actual measurement
+//#define MICROSECONDS_IN_SECOND 1e6 // Conversion factor for microseconds to seconds
+//#define BYTES_TO_MEGABITS 8388608  // 8 * 1024 * 1024 (to convert bytes to megabits)
+//#define SUCCESS 0
+//#define FAILURE 1
+//
+//// Function to calculate the throughput in Mbit/s
+//double calculate_throughput(struct timeval start_time, struct timeval end_time, int data_size_bytes) {
+//  // Convert seconds and microseconds to total elapsed time in seconds
+//  double elapsed_time_seconds = (double)(end_time.tv_sec - start_time.tv_sec) +
+//                                (double)(end_time.tv_usec - start_time.tv_usec) / MICROSECONDS_IN_SECOND; // Time in seconds
+//
+//  // Calculate total data transmitted in megabits (Bytes to Megabits conversion)
+//  double total_data_megabits = ((double)data_size_bytes * (double)NUM_MESSAGES * 8) / BYTES_TO_MEGABITS;
+//
+//  // Calculate throughput in Mbit/s (Megabits per second)
+//  double throughput_mbps = total_data_megabits / elapsed_time_seconds;
+//
+//  return throughput_mbps;
+//}
+//
+//// Function to post a send request with the specified flags
+//static int submit_send_request(struct pingpong_context* context, unsigned int send_flags) {
+//  // Initialize a scatter-gather element (SGL)
+//  struct ibv_sge scatter_gather_entry;
+//  scatter_gather_entry.addr = (uint64_t)context->buf;   // Buffer address
+//  scatter_gather_entry.length = context->size;          // Size of the buffer
+//  scatter_gather_entry.lkey = context->mr->lkey;        // Local key for the memory region
+//
+//  // Initialize a work request (WR)
+//  struct ibv_send_wr send_request;
+//  struct ibv_send_wr* bad_request = NULL;
+//  send_request.wr_id = PINGPONG_SEND_WRID;    // Work request ID
+//  send_request.sg_list = &scatter_gather_entry; // Scatter-gather list
+//  send_request.num_sge = 1;                   // Number of scatter-gather elements
+//  send_request.opcode = IBV_WR_SEND;          // Operation code (send)
+//  send_request.send_flags = send_flags;       // Send flags (e.g., signaling)
+//  send_request.next = NULL;                   // Pointer to the next work request
+//  struct ibv_send_wr* bad_request = NULL;
+//
+//  // Post the send request to the queue pair
+//  int result = ibv_post_send(context->qp, &send_request, &bad_request);
+//  if (result) {
+//    fprintf(stderr, "Error: Failed to post send request\n");
+//    return FAILURE;
+//  }
+//
+//  return SUCCESS;
+//}
+//
+//// Function to send data multiple times based on the specified depth and size
+//int transmit_data(struct pingpong_context* context, int data_size_bytes, int num_iterations, int tx_depth) {
+//  // Set the size of the data to be sent in the context
+//  context->size = data_size_bytes;
+//
+//  // Determine the send flag: signaled, and optionally inline if data size allows
+//  unsigned int send_flags = IBV_SEND_SIGNALED;
+//  if (data_size_bytes < MAX_INLINE) {
+//    send_flags |= IBV_SEND_INLINE; // Add the inline flag if applicable
+//  }
+//
+//  for (int iteration = 0; iteration < num_iterations; iteration++) {
+//    // After every 'tx_depth' sends, wait for the completions
+//    if ((iteration != 0) && (iteration % tx_depth == 0)) {
+//      pp_wait_completions(context, tx_depth);
+//    }
+//
+//    // Attempt to post the send request with the current flag
+//    int result = submit_send_request(context, send_flags);
+//    if (result != SUCCESS) {
+//      fprintf(stderr, "Error: Client couldn't post send\n");
+//      return FAILURE;
+//    }
+//  }
+//
+//  // Ensure all sends have completed
+//  pp_wait_completions(context, tx_depth);
+//  // Wait for a single completion (likely a response from the server)
+//  pp_wait_completions(context, 1);
+//
+//  return SUCCESS;
+//}
+//
+//// Function to receive data multiple times based on the specified size and iterations
+//int receive_data(struct pingpong_context* context, int data_size_bytes, int num_iterations) {
+//  // Set the flag to be used for sending the response
+//  unsigned int send_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
+//
+//  // Wait for completions for all iterations
+//  pp_wait_completions(context, num_iterations);
+//
+//  // Save the current data size and temporarily set it to 1 for the response
+//  int original_data_size = context->size;
+//  context->size = 1;
+//
+//  // Attempt to post the send request with the specified flag
+//  int result = submit_send_request(context, send_flags);
+//  if (result != SUCCESS) {
+//    fprintf(stderr, "Error: Server couldn't post send\n");
+//    return FAILURE;
+//  }
+//
+//  // Restore the original data size
+//  context->size = original_data_size;
+//
+//  // Wait for the completion of the send request
+//  pp_wait_completions(context, 1);
+//
+//  return SUCCESS;
+//}
+//
+//// Client function to perform throughput measurement for different data sizes
+//int client(int tx_depth, struct pingpong_context* context) {
+//  struct timeval start_time, end_time;
+//
+//  // Allocate memory to store throughput results for different data sizes
+//  double* throughput_results = (double*)malloc((MEGA_POWER + 1) * sizeof(double));
+//  if (!throughput_results) {
+//    fprintf(stderr, "Error: Memory allocation failed\n");
+//    return FAILURE;
+//  }
+//
+//  int result_index = 0;
+//
+//  // Iterate over data sizes from 1 byte to MEGABIT bytes, doubling each time
+//  for (int data_size_bytes = 1; data_size_bytes <= MEGABIT; data_size_bytes <<= 1) {
+//    // Perform warm-up cycles to stabilize measurements
+//    transmit_data(context, data_size_bytes, NUM_WARMUP_CYCLES, tx_depth);
+//
+//    // Measure the time taken to send the data
+//    gettimeofday(&start_time, NULL);        // Record start time
+//    transmit_data(context, data_size_bytes, NUM_MESSAGES, tx_depth);
+//    gettimeofday(&end_time, NULL);          // Record end time
+//
+//    // Calculate throughput for the current data size
+//    throughput_results[result_index] = calculate_throughput(start_time, end_time, data_size_bytes);
+//
+//    // Output the throughput for the current data size
+//    printf("%d\t%f\tMbit/s\n", data_size_bytes, throughput_results[result_index]);
+//    result_index++;
+//  }
+//
+//  // Indicate that the client operation is complete
+//  printf("Client: Done.\n");
+//
+//  // Free the allocated memory
+//  free(throughput_results);
+//
+//  return SUCCESS;
+//}
+//
+//// Server function to receive data for different data sizes
+//int server(struct pingpong_context* context) {
+//  // Iterate over data sizes from 1 byte to MEGABIT bytes, doubling each time
+//  for (int data_size_bytes = 1; data_size_bytes <= MEGABIT; data_size_bytes <<= 1) {
+//    // Perform warm-up cycles to stabilize measurements
+//    receive_data(context, data_size_bytes, NUM_WARMUP_CYCLES);
+//
+//    // Receive the actual data for the given size
+//    receive_data(context, data_size_bytes, NUM_MESSAGES);
+//  }
+//
+//  // Indicate that the server operation is complete
+//  printf("Server: Done.\n");
+//  return SUCCESS;
+//}
 
 
 //#############################################################################
@@ -1020,34 +813,6 @@ int server(struct pingpong_context* context) {
 //#############################################################################
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #define NUM_MESSAGES 8192          // Number of messages to be sent/received during measurement
 #define NUM_WARMUP_CYCLES 1024     // Number of warm-up cycles before actual measurement
 #define MICROSECONDS_IN_SECOND 1e6 // Conversion factor for microseconds to seconds
@@ -1080,7 +845,6 @@ static int submit_send_request(struct pingpong_context* context, unsigned int se
 
   // Initialize a work request (WR)
   struct ibv_send_wr send_request;
-  struct ibv_send_wr* bad_request = NULL;
   send_request.wr_id = PINGPONG_SEND_WRID;    // Work request ID
   send_request.sg_list = &scatter_gather_entry; // Scatter-gather list
   send_request.num_sge = 1;                   // Number of scatter-gather elements
@@ -1260,94 +1024,11 @@ int kv_open(char *servername, void **kv_handle){/*Connect to server*/
 
     srand48(getpid() * time(NULL));
 
-    while (1) {
-      int c;
 
-      static struct option long_options[] = {
-          { .name = "port",     .has_arg = 1, .val = 'p' },
-          { .name = "ib-dev",   .has_arg = 1, .val = 'd' },
-          { .name = "ib-port",  .has_arg = 1, .val = 'i' },
-          { .name = "size",     .has_arg = 1, .val = 's' },
-          { .name = "mtu",      .has_arg = 1, .val = 'm' },
-          { .name = "rx-depth", .has_arg = 1, .val = 'r' },
-          { .name = "iters",    .has_arg = 1, .val = 'n' },
-          { .name = "sl",       .has_arg = 1, .val = 'l' },
-          { .name = "events",   .has_arg = 0, .val = 'e' },
-          { .name = "gid-idx",  .has_arg = 1, .val = 'g' },
-          { 0 }
-      };
-
-      c = getopt_long(argc, argv, "p:d:i:s:m:r:n:l:eg:", long_options, NULL);
-      if (c == -1)
-        break;
-
-      switch (c) {
-        case 'p':
-          port = strtol(optarg, NULL, 0);
-          if (port < 0 || port > 65535) {
-            usage(argv[0]);
-            return 1;
-          }
-          break;
-
-        case 'd':
-          ib_devname = strdup(optarg);
-          break;
-
-        case 'i':
-          ib_port = strtol(optarg, NULL, 0);
-          if (ib_port < 0) {
-            usage(argv[0]);
-            return 1;
-          }
-          break;
-
-        case 's':
-          size = strtol(optarg, NULL, 0);
-          break;
-
-        case 'm':
-          mtu = pp_mtu_to_enum(strtol(optarg, NULL, 0));
-          if (mtu < 0) {
-            usage(argv[0]);
-            return 1;
-          }
-          break;
-
-        case 'r':
-          rx_depth = strtol(optarg, NULL, 0);
-          break;
-
-        case 'n':
-          iters = strtol(optarg, NULL, 0);
-          break;
-
-        case 'l':
-          sl = strtol(optarg, NULL, 0);
-          break;
-
-        case 'e':
-          ++use_event;
-          break;
-
-        case 'g':
-          gidx = strtol(optarg, NULL, 0);
-          break;
-
-        default:
-          usage(argv[0]);
-          return 1;
-      }
-    }
     //TODO check if we need to do strcpy. if we do change pp_close_ctx to a
     // new function that alos free thisservername
     thisservername = servername;
-//  if (optind == argc - 1)
-//    thisservername = strdup(argv[optind]);
-    else if (optind < argc) {
-      usage(argv[0]);
-      return 1;
-    }
+
 
     page_size = sysconf(_SC_PAGESIZE);
 
@@ -1434,7 +1115,7 @@ int kv_open(char *servername, void **kv_handle){/*Connect to server*/
       if (pp_connect_ctx(ctx, ib_port, my_dest.psn, mtu, sl, rem_dest, gidx))
         return 1;
 
-    *kv_handle = ctx
+    *kv_handle = ctx;
     ibv_free_device_list(dev_list);
     free(rem_dest);
     return 0;
@@ -1715,4 +1396,213 @@ int run_server(char* clients_names, int num_clients){
       }
     }
   }
+}
+
+
+int main(int argc, char *argv[])
+{
+    struct ibv_device      **dev_list;
+    struct ibv_device       *ib_dev;
+    struct pingpong_context *ctx;
+    struct pingpong_dest     my_dest;
+    struct pingpong_dest    *rem_dest;
+    char                    *ib_devname = NULL;
+    char                    *servername;
+    int                      port = PORT;
+    int                      ib_port = 1;
+    enum ibv_mtu             mtu = IBV_MTU_2048;
+    int                      rx_depth = 100;
+    int                      tx_depth = 100;
+    int                      iters = 256;
+    int                      use_event = 0;
+    int                      size = MEGABIT;
+    int                      sl = 0;
+    int                      gidx = -1;
+    char                     gid[33];
+
+    srand48(getpid() * time(NULL));
+
+    while (1) {
+        int c;
+
+        static struct option long_options[] = {
+                { .name = "port",     .has_arg = 1, .val = 'p' },
+                { .name = "ib-dev",   .has_arg = 1, .val = 'd' },
+                { .name = "ib-port",  .has_arg = 1, .val = 'i' },
+                { .name = "size",     .has_arg = 1, .val = 's' },
+                { .name = "mtu",      .has_arg = 1, .val = 'm' },
+                { .name = "rx-depth", .has_arg = 1, .val = 'r' },
+                { .name = "iters",    .has_arg = 1, .val = 'n' },
+                { .name = "sl",       .has_arg = 1, .val = 'l' },
+                { .name = "events",   .has_arg = 0, .val = 'e' },
+                { .name = "gid-idx",  .has_arg = 1, .val = 'g' },
+                { 0 }
+        };
+
+        c = getopt_long(argc, argv, "p:d:i:s:m:r:n:l:eg:", long_options, NULL);
+        if (c == -1)
+            break;
+
+        switch (c) {
+            case 'p':
+                port = strtol(optarg, NULL, 0);
+                if (port < 0 || port > 65535) {
+                    usage(argv[0]);
+                    return 1;
+                }
+                break;
+
+            case 'd':
+                ib_devname = strdup(optarg);
+                break;
+
+            case 'i':
+                ib_port = strtol(optarg, NULL, 0);
+                if (ib_port < 0) {
+                    usage(argv[0]);
+                    return 1;
+                }
+                break;
+
+            case 's':
+                size = strtol(optarg, NULL, 0);
+                break;
+
+            case 'm':
+                mtu = pp_mtu_to_enum(strtol(optarg, NULL, 0));
+                if (mtu < 0) {
+                    usage(argv[0]);
+                    return 1;
+                }
+                break;
+
+            case 'r':
+                rx_depth = strtol(optarg, NULL, 0);
+                break;
+
+            case 'n':
+                iters = strtol(optarg, NULL, 0);
+                break;
+
+            case 'l':
+                sl = strtol(optarg, NULL, 0);
+                break;
+
+            case 'e':
+                ++use_event;
+                break;
+
+            case 'g':
+                gidx = strtol(optarg, NULL, 0);
+                break;
+
+            default:
+                usage(argv[0]);
+                return 1;
+        }
+    }
+
+    if (optind == argc - 1)
+        servername = strdup(argv[optind]);
+    else if (optind < argc) {
+        usage(argv[0]);
+        return 1;
+    }
+
+    page_size = sysconf(_SC_PAGESIZE);
+
+    dev_list = ibv_get_device_list(NULL);
+    if (!dev_list) {
+        perror("Failed to get IB devices list");
+        return 1;
+    }
+
+    if (!ib_devname) {
+        ib_dev = *dev_list;
+        if (!ib_dev) {
+            fprintf(stderr, "No IB devices found\n");
+            return 1;
+        }
+    } else {
+        int i;
+        for (i = 0; dev_list[i]; ++i)
+            if (!strcmp(ibv_get_device_name(dev_list[i]), ib_devname))
+                break;
+        ib_dev = dev_list[i];
+        if (!ib_dev) {
+            fprintf(stderr, "IB device %s not found\n", ib_devname);
+            return 1;
+        }
+    }
+
+    ctx = pp_init_ctx(ib_dev, size, rx_depth, tx_depth, ib_port, use_event, !servername);
+    if (!ctx)
+        return 1;
+
+    ctx->routs = pp_post_recv(ctx, ctx->rx_depth);
+    if (ctx->routs < ctx->rx_depth) {
+        fprintf(stderr, "Couldn't post receive (%d)\n", ctx->routs);
+        return 1;
+    }
+
+    if (use_event)
+        if (ibv_req_notify_cq(ctx->cq, 0)) {
+            fprintf(stderr, "Couldn't request CQ notification\n");
+            return 1;
+        }
+
+
+    if (pp_get_port_info(ctx->context, ib_port, &ctx->portinfo)) {
+        fprintf(stderr, "Couldn't get port info\n");
+        return 1;
+    }
+
+    my_dest.lid = ctx->portinfo.lid;
+    if (ctx->portinfo.link_layer == IBV_LINK_LAYER_INFINIBAND && !my_dest.lid) {
+        fprintf(stderr, "Couldn't get local LID\n");
+        return 1;
+    }
+
+    if (gidx >= 0) {
+        if (ibv_query_gid(ctx->context, ib_port, gidx, &my_dest.gid)) {
+            fprintf(stderr, "Could not get local gid for gid index %d\n", gidx);
+            return 1;
+        }
+    } else
+        memset(&my_dest.gid, 0, sizeof my_dest.gid);
+
+    my_dest.qpn = ctx->qp->qp_num;
+    my_dest.psn = lrand48() & 0xffffff;
+    inet_ntop(AF_INET6, &my_dest.gid, gid, sizeof gid);
+    printf("  local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
+           my_dest.lid, my_dest.qpn, my_dest.psn, gid);
+
+
+    if (servername)
+        rem_dest = pp_client_exch_dest(servername, port, &my_dest);
+    else
+        rem_dest = pp_server_exch_dest(ctx, ib_port, mtu, port, sl, &my_dest, gidx);
+
+    if (!rem_dest)
+        return 1;
+
+    inet_ntop(AF_INET6, &rem_dest->gid, gid, sizeof gid);
+    printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
+           rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
+
+    if (servername)
+        if (pp_connect_ctx(ctx, ib_port, my_dest.psn, mtu, sl, rem_dest, gidx))
+            return 1;
+
+    if (servername) {
+        // Client helper function
+        client(ctx, tx_depth);
+    } else {
+        // Server helper function
+        server(ctx);
+    }
+
+    ibv_free_device_list(dev_list);
+    free(rem_dest);
+    return 0;
 }

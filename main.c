@@ -1359,27 +1359,76 @@ int get_server(struct pingpong_context *ctx,char** client_space){
 
 }
 
-//int init_server_space(char** client_space, void** ctxs,
-//    int num_clients){
-//    *client_space = calloc(num_clients, sizeof(void*));
-//    if(*client_space == NULL){
-//      return 1;//couldn't allocate the space
-//    }
-//    *ctxs = calloc(num_clients, sizeof (struct pingpong_context*));
-//    if(*ctxs == NULL){
-//      return 1;//couldn't allocate the space
-//    }
-//  return 0;
-//
-//}
+int init_client_space(char** client_space){
+    *client_space = calloc(1, sizeof(void*));
+    if(*client_space == NULL){
+      return 1;//couldn't allocate the space
+    }
+  return 0;
 
+}
+void free_client_spaces(char* clients_spaces[], int num_clients){
+  for(int i=0;i<num_clients;i++){
+    free(clients_spaces[i]);
+  }
+  free (clients_spaces);//todo check is it needed?
+}
+
+void close_ctxs(struct pingpong_context* ctxs[], int num_clients){
+  for(int i=0;i<num_clients;i++){
+    kv_close (ctxs[i]);
+  }
+  free (ctxs);//todo check is it needed?
+}
+/**
+ * add a single client to the server
+ * @param clients_spaces the space to add
+ * @param ctxs the contexts list to add
+ * @param num_clients the number of clients
+ * @return 0 if suceeded 1 if failed
+ */
+int add_client(char* clients_spaces[], struct pingpong_context* ctxs[], int
+    num_clients,int port, int my_psn,
+               enum ibv_mtu mtu, int sl,
+               struct pingpong_dest *dest, int sgid_idx){
+  if(init_client_space(&(clients_spaces[num_clients]))){
+    return 1;
+  }
+  if(kv_open(NULL,(void**)(&(ctxs[num_clients]))))
+  {
+    free(clients_spaces[num_clients+1]);
+    return 1;
+  }
+  if(pp_connect_ctx (ctxs[num_clients], port, my_psn,mtu,sl,dest,sgid_idx)){
+    /**
+     * struct pingpong_context *ctx, int port, int my_psn,
+                          enum ibv_mtu mtu, int sl,
+                          struct pingpong_dest *dest, int sgid_idx)
+{
+     */
+    free(clients_spaces[num_clients+1]);
+    kv_close((void**)(&(ctxs[num_clients])));
+    return 1;
+  }
+  return 0;
+}
+/**
+ * free clients from the server
+ * @param clients_spaces
+ * @param ctxs
+ * @param num_clients
+ */
+void free_clients_from_server(char* clients_spaces[], struct pingpong_context*
+    ctxs[], int num_clients){
+  free_client_spaces (clients_spaces,num_clients);
+  close_ctxs (ctxs,num_clients);
+}
 int run_server(){
   //stage 1: init server with clients initialised, each with its own space
   // set to NULL.
   char* clients_spaces[MAX_NUMBER_CLIENTS];
   struct pingpong_context* ctxs[MAX_NUMBER_CLIENTS];
-  void* serverctx;
-  kv_open(NULL,&serverctx);
+  void*                   serverctx;
   struct pingpong_dest    *rem_dest[MAX_NUMBER_CLIENTS];
   struct pingpong_dest    *my_dest;
   char                    *ib_devname = NULL;
@@ -1389,6 +1438,8 @@ int run_server(){
   int                      sl = 0;
   int                      gidx = -1;//
   // stage 2: create the link to the communication and validate it
+  kv_open(NULL,&serverctx);
+
 
 //  for(int i=0;i<num_clients;i++){
 //    kv_open(clients_names[i], (void**)&(ctxs[i]));
@@ -1400,10 +1451,13 @@ int run_server(){
       rem_dest[num_clients] = pp_server_exch_dest(serverctx, ib_port, mtu, port, sl, &my_dest, gidx);
       if(rem_dest[num_clients]!=NULL)
       {
-          clients_spaces[num_clients] = init_server_space();
-          ctxs[num_clients] = pp_init_ctx()
-          num_clients++;
-
+        //todo for tommorrow: get: my_psn, sgid.
+        if(add_client (clients_spaces,ctxs,num_clients,port,my_psn=NULL,mtu,
+                       sl,rem_dest[num_clients],sgid_idx=NULL)){
+          free_clients_from_server(clients_spaces,ctxs,num_clients);
+          return 1;
+        }
+        num_clients++;
       }
       for(int i=0;i<num_clients;i++){
       if(((struct pingpong_context*) ctxs)[i].set){

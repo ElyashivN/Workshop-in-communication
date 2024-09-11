@@ -47,6 +47,7 @@
 #include <netdb.h>
 #include <time.h>
 
+
 #include <infiniband/verbs.h>
 
 #define WC_BATCH (10)
@@ -57,7 +58,7 @@
 #define MAX_INLINE 60
 #define MEGABIT 1048576
 #define MEGA_POWER 20
-#define PORT 8540
+#define PORT 23330
 #define GIGABIT 1073741824
 #define KB4 4096
 #define NUM_DEF_CLIENTS 4
@@ -1380,38 +1381,142 @@ void close_ctxs(struct pingpong_context* ctxs[], int num_clients){
   }
   free (ctxs);//todo check is it needed?
 }
+
+#include <infiniband/verbs.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
 /**
- * add a single client to the server
- * @param clients_spaces the space to add
- * @param ctxs the contexts list to add
- * @param num_clients the number of clients
- * @return 0 if suceeded 1 if failed
+ * Find the correct GID index for a given context and port.
+ * @param context: The InfiniBand device context
+ * @param ib_port: The InfiniBand port number
+ * @param gid: A pointer to store the found GID
+ * @return The GID index if found, or -1 on failure
  */
-int add_client(char* clients_spaces[], struct pingpong_context* ctxs[], int
-    num_clients,int port, int my_psn,
-               enum ibv_mtu mtu, int sl,
-               struct pingpong_dest *dest, int sgid_idx){
-  if(init_client_space(&(clients_spaces[num_clients]))){
+int find_sgid_index(struct ibv_context *context, int ib_port, union ibv_gid *gid) {
+  struct ibv_port_attr port_attr;
+
+  // Query the port to get the number of available GIDs
+  if (ibv_query_port(context, ib_port, &port_attr)) {
+    fprintf(stderr, "Error: Failed to query port info for port %d\n", ib_port);
+    return -1;
+  }
+
+  // Iterate over all available GID indices
+  for (int gid_idx = 0; gid_idx < port_attr.gid_tbl_len; gid_idx++) {
+    // todo check if this type of query isnt too much time consuming. can we
+    //  do it any other way?
+    if (ibv_query_gid(context, ib_port, gid_idx, gid)) {
+      fprintf(stderr, "Error: Failed to query GID at index %d for port %d\n", gid_idx, ib_port);
+      continue;
+    }
+
+    // If GID has a valid interface ID, it's a valid SGID
+    if (gid->global.interface_id != 0) {
+      printf("Valid GID found at index %d: %016llx:%016llx\n",
+             gid_idx,
+             (unsigned long long) gid->global.subnet_prefix,
+             (unsigned long long) gid->global.interface_id);
+      return gid_idx;
+    }
+  }
+
+  // No valid GID index found
+  fprintf(stderr, "Error: No valid GID found for port %d\n", ib_port);
+  return -1;
+}
+
+/**
+ * Add a single client to the server
+ * @param clients_spaces: Array to hold client spaces
+ * @param ctxs: Array to hold pingpong contexts for each client
+ * @param num_clients: The current number of clients
+ * @param port: The port number used for communication
+ * @param mtu: The Maximum Transmission Unit size
+ * @param sl: Service Level value
+ * @param dest: Destination structure holding client connection information
+ * @return 0 if succeeded, 1 if failed
+ */
+int add_client(char* clients_spaces[], struct pingpong_context* ctxs[], int num_clients,
+               int port, enum ibv_mtu mtu, int sl, struct pingpong_dest *dest) {
+
+  // Initialize client space
+  if (init_client_space(&(clients_spaces[num_clients]))) {
     return 1;
   }
-  if(kv_open(NULL,(void**)(&(ctxs[num_clients]))))
-  {
-    free(clients_spaces[num_clients+1]);
+
+  // Open the key-value store for the client
+  if (kv_open(NULL, (void**)(&(ctxs[num_clients])))) {
+    free(clients_spaces[num_clients]);
     return 1;
   }
-  if(pp_connect_ctx (ctxs[num_clients], port, my_psn,mtu,sl,dest,sgid_idx)){
-    /**
-     * struct pingpong_context *ctx, int port, int my_psn,
-                          enum ibv_mtu mtu, int sl,
-                          struct pingpong_dest *dest, int sgid_idx)
-{
-     */
-    free(clients_spaces[num_clients+1]);
+
+  // Generate a random PSN (Packet Sequence Number)
+  int my_psn = lrand48() & 0xffffff;
+
+  // Find the correct SGID index and GID
+  union ibv_gid sgid;
+  int sgid_idx = find_sgid_index(ctxs[num_clients]->context, port, &sgid);
+  if (sgid_idx < 0) {
+    fprintf(stderr, "Error: Failed to find a valid SGID index\n");
+    free(clients_spaces[num_clients]);
     kv_close((void**)(&(ctxs[num_clients])));
     return 1;
   }
+
+  // Connect the client's QP (Queue Pair) with the server using the found SGID index
+  if (pp_connect_ctx(ctxs[num_clients], port, my_psn, mtu, sl, dest, sgid_idx)) {
+    free(clients_spaces[num_clients]);
+    kv_close((void**)(&(ctxs[num_clients])));
+    return 1;
+  }
+
   return 0;
 }
+
+//
+///**
+// * add a single client to the server
+// * @param clients_spaces the space to add
+// * @param ctxs the contexts list to add
+// * @param num_clients the number of clients
+// * @return 0 if suceeded 1 if failed
+// */
+//int add_client(char* clients_spaces[], struct pingpong_context* ctxs[], int
+//    num_clients,int port,
+//               enum ibv_mtu mtu, int sl,
+//               struct pingpong_dest *dest){
+//
+//  if(init_client_space(&(clients_spaces[num_clients]))){
+//    return 1;
+//  }
+//  if(kv_open(NULL,(void**)(&(ctxs[num_clients]))))
+//  {
+//    free(clients_spaces[num_clients]);
+//    return 1;
+//  }
+//  //todo for tommorrow: get: my_psn, sgid.
+//  int my_psn = lrand48() & 0xffffff;
+//  int sgid_idx;
+//  if (ibv_query_gid(ctxs[num_clients]->context, port, gid_index,&sgid){
+//    free(clients_spaces[num_clients]);
+//    kv_close((void**)(&(ctxs[num_clients])));
+//    return 1;
+//  }
+//  if(pp_connect_ctx (ctxs[num_clients], port, my_psn,mtu,sl,dest,sgid_idx)){
+//    /**
+//     * struct pingpong_context *ctx, int port, int my_psn,
+//                          enum ibv_mtu mtu, int sl,
+//                          struct pingpong_dest *dest, int sgid_idx)
+//{
+//     */
+//    free(clients_spaces[num_clients]);
+//    kv_close((void**)(&(ctxs[num_clients])));
+//    return 1;
+//  }
+//  return 0;
+//}
 /**
  * free clients from the server
  * @param clients_spaces
@@ -1423,6 +1528,10 @@ void free_clients_from_server(char* clients_spaces[], struct pingpong_context*
   free_client_spaces (clients_spaces,num_clients);
   close_ctxs (ctxs,num_clients);
 }
+/**
+ * run server
+ * @return o if successes, 1 if fails
+ */
 int run_server(){
   //stage 1: init server with clients initialised, each with its own space
   // set to NULL.
@@ -1432,7 +1541,9 @@ int run_server(){
   struct pingpong_dest    *rem_dest[MAX_NUMBER_CLIENTS];
   struct pingpong_dest    *my_dest;
   char                    *ib_devname = NULL;
-  int                      port = PORT;
+  int                      port = PORT;//todo can be changed to be run
+  // dependant
+
   int                      ib_port = 1;
   enum ibv_mtu             mtu = IBV_MTU_4096;
   int                      sl = 0;
@@ -1448,26 +1559,28 @@ int run_server(){
   int num_clients = 0;
   while(1){
       //stage 2: create the link to the communication and validate it
-      rem_dest[num_clients] = pp_server_exch_dest(serverctx, ib_port, mtu, port, sl, &my_dest, gidx);
+      rem_dest[num_clients] = pp_server_exch_dest(serverctx, ib_port, mtu, port, sl, my_dest, gidx);
       if(rem_dest[num_clients]!=NULL)
       {
-        //todo for tommorrow: get: my_psn, sgid.
-        if(add_client (clients_spaces,ctxs,num_clients,port,my_psn=NULL,mtu,
-                       sl,rem_dest[num_clients],sgid_idx=NULL)){
+
+        if(add_client (clients_spaces,ctxs,num_clients,port,mtu,
+                       sl,rem_dest[num_clients])){
           free_clients_from_server(clients_spaces,ctxs,num_clients);
           return 1;
         }
+        printf ("added a new client with  psn: %d and gid %d",
+                rem_dest[num_clients]->psn,rem_dest[num_clients]->gid);
         num_clients++;
       }
       for(int i=0;i<num_clients;i++){
       if(((struct pingpong_context*) ctxs)[i].set){
         //set request
-        set_server (&(ctxs)[i],
+        set_server ((ctxs)[i],
             &(clients_spaces[i]));
       }
       else{
         //get request
-        get_server  (&(ctxs)[i],
+        get_server  ((ctxs)[i],
                      &(clients_spaces[i]));
       }
     }
@@ -1504,10 +1617,12 @@ int main(int argc, char *argv[]){
         return 0;
     if(argc ==1){
         //client
+        printf("client added!_ debug");
         test_client(DEFAULT_SERVERNAME);
     }
     else{
         //server
-        run_server(&argv[1], argc-1);
+        printf ("server debug");
+        run_server();
     }
 }

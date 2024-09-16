@@ -1549,7 +1549,9 @@ int run_server(){
   int                      sl = 0;
   int                      gidx = -1;//
   // stage 2: create the link to the communication and validate it
+  printf("going into kv_open\n");
   kv_open(NULL,&serverctx);
+  printf("finished kv_open\n");
 
 
 //  for(int i=0;i<num_clients;i++){
@@ -1558,10 +1560,12 @@ int run_server(){
   //stage 3(repeat): check on all clients and handle requests accordingly, and add clients if needed
   int num_clients = 0;
   while(1){
+    printf ("inside loop");
       //stage 2: create the link to the communication and validate it
       rem_dest[num_clients] = pp_server_exch_dest(serverctx, ib_port, mtu, port, sl, my_dest, gidx);
       if(rem_dest[num_clients]!=NULL)
       {
+        printf ("tried to add client");
 
         if(add_client (clients_spaces,ctxs,num_clients,port,mtu,
                        sl,rem_dest[num_clients])){
@@ -1573,6 +1577,7 @@ int run_server(){
         num_clients++;
       }
       for(int i=0;i<num_clients;i++){
+        printf("get/set rewquests");
       if(((struct pingpong_context*) ctxs)[i].set){
         //set request
         set_server ((ctxs)[i],
@@ -1613,16 +1618,15 @@ int main(int argc, char *argv[]){
 ////stage 3: continue cycle -> search for get/set from existing clients and add clint sif neededed.
 ///server
 ///client servername
-    if(argc == 0)
-        return 0;
-    if(argc ==1){
+    printf ("argc is: %d\n",argc);
+    if(argc > 1){
         //client
-        printf("client added!_ debug");
+        printf("client added!_ debug\n");
         test_client(DEFAULT_SERVERNAME);
     }
     else{
         //server
-        printf ("server debug");
+        printf ("server debug\n");
         run_server();
     }
 }
